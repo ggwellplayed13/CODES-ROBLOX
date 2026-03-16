@@ -18,6 +18,15 @@ local CurrencyRemotes = ReplicatedStorage:WaitForChild("CurrencyRemotes")
 local OpenShopEvent = CurrencyRemotes:WaitForChild("OpenShop")
 local PurchaseItemEvent = CurrencyRemotes:WaitForChild("PurchaseItem")
 local SyncDataEvent = CurrencyRemotes:WaitForChild("SyncData")
+local PurchaseRobuxItemEvent = CurrencyRemotes:WaitForChild("PurchaseRobuxItem", 30)
+local RobuxBoostSyncEvent = CurrencyRemotes:WaitForChild("RobuxBoostSync", 30)
+
+if not PurchaseRobuxItemEvent then
+	warn("[ShopUI] PurchaseRobuxItem remote not found - Premium purchases will not work")
+end
+if not RobuxBoostSyncEvent then
+	warn("[ShopUI] RobuxBoostSync remote not found - Premium ownership sync will not work")
+end
 
 -- -------------------------------------------------------------------------------
 -- VALOR COIN IMAGE ASSET
@@ -55,9 +64,63 @@ local ITEMS = {
 	{id = "turbo_boots", name = "Turbo Boots", description = "+100% speed for 15 sec", price = 60, icon = "??", category = "Speed"},
 }
 
+-- -------------------------------------------------------------------------------
+-- PREMIUM ITEMS CONFIGURATION (ROBUX)
+-- -------------------------------------------------------------------------------
+
+local PREMIUM_ITEMS = {
+	{
+		id = "SPEED_BOOST_1LIFE",
+		name = "Speed Boost",
+		description = "x1.5 speed until you die",
+		price = 9,
+		icon = "⚡",
+		tag = "1 Life",
+		forever = false,
+	},
+	{
+		id = "SPEED_BOOST_FOREVER",
+		name = "Speed Boost",
+		description = "x1.5 speed permanently",
+		price = 129,
+		icon = "🌟",
+		tag = "Forever",
+		forever = true,
+		ownedField = "hasSpeedBoostForever",
+	},
+	{
+		id = "DOUBLE_HEALTH_1LIFE",
+		name = "Double Health",
+		description = "x2 max health until you die",
+		price = 9,
+		icon = "❤️",
+		tag = "1 Life",
+		forever = false,
+	},
+	{
+		id = "DOUBLE_HEALTH_FOREVER",
+		name = "Double Health",
+		description = "x2 max health permanently",
+		price = 129,
+		icon = "💎",
+		tag = "Forever",
+		forever = true,
+		ownedField = "hasDoubleHealthForever",
+	},
+}
+
+-- Tracks ownership of permanent Robux items (updated via RobuxBoostSync event)
+local robuxOwnership = {
+	hasSpeedBoostForever   = false,
+	hasDoubleHealthForever = false,
+	hasSpeedBoost1Life     = false,
+	hasDoubleHealth1Life   = false,
+}
+
 local shopGui = nil
 local isShopOpen = false
 local playerVC = 0
+local activeTab = "items" -- "items" or "premium"
 
 _G.ShopIsOpen = false
 
@@ -343,13 +406,82 @@ local function CreateShopUI()
 		CloseShop()
 	end)
 
-	-- Content container with padding
+	-- -----------------------------------------------------------------------
+	-- TAB BAR (between header and content)
+	-- -----------------------------------------------------------------------
+
+	local tabHeight = isMobile and 38 or 42
+
+	local tabBar = Instance.new("Frame")
+	tabBar.Name = "TabBar"
+	tabBar.Size = UDim2.new(1, 0, 0, tabHeight)
+	tabBar.Position = UDim2.new(0, 0, 0, headerHeight)
+	tabBar.BackgroundColor3 = Color3.fromRGB(45, 50, 65)
+	tabBar.BorderSizePixel = 0
+	tabBar.Parent = mainFrame
+
+	local tabPadding = Instance.new("UIPadding")
+	tabPadding.PaddingLeft  = UDim.new(0, isMobile and 8 or 12)
+	tabPadding.PaddingRight = UDim.new(0, isMobile and 8 or 12)
+	tabPadding.PaddingTop    = UDim.new(0, 5)
+	tabPadding.PaddingBottom = UDim.new(0, 5)
+	tabPadding.Parent = tabBar
+
+	local tabList = Instance.new("UIListLayout")
+	tabList.FillDirection = Enum.FillDirection.Horizontal
+	tabList.Padding = UDim.new(0, isMobile and 6 or 8)
+	tabList.VerticalAlignment = Enum.VerticalAlignment.Center
+	tabList.Parent = tabBar
+
+	local tabBtnWidth = isMobile and 110 or 130
+	local tabBtnHeight = tabHeight - 10
+
+	local itemsTabBtn = Instance.new("TextButton")
+	itemsTabBtn.Name = "ItemsTab"
+	itemsTabBtn.Size = UDim2.new(0, tabBtnWidth, 0, tabBtnHeight)
+	itemsTabBtn.BackgroundColor3 = Color3.fromRGB(60, 70, 90)  -- active color
+	itemsTabBtn.Text = "🛒 Items"
+	itemsTabBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+	itemsTabBtn.TextScaled = true
+	itemsTabBtn.Font = Enum.Font.GothamBold
+	itemsTabBtn.BorderSizePixel = 0
+	itemsTabBtn.Parent = tabBar
+
+	local itemsTabCorner = Instance.new("UICorner")
+	itemsTabCorner.CornerRadius = UDim.new(0, 8)
+	itemsTabCorner.Parent = itemsTabBtn
+
+	local premiumTabBtn = Instance.new("TextButton")
+	premiumTabBtn.Name = "PremiumTab"
+	premiumTabBtn.Size = UDim2.new(0, tabBtnWidth, 0, tabBtnHeight)
+	premiumTabBtn.BackgroundColor3 = Color3.fromRGB(35, 38, 52)  -- inactive color
+	premiumTabBtn.Text = "💎 Premium"
+	premiumTabBtn.TextColor3 = Color3.fromRGB(160, 165, 185)
+	premiumTabBtn.TextScaled = true
+	premiumTabBtn.Font = Enum.Font.GothamBold
+	premiumTabBtn.BorderSizePixel = 0
+	premiumTabBtn.Parent = tabBar
+
+	local premiumTabCorner = Instance.new("UICorner")
+	premiumTabCorner.CornerRadius = UDim.new(0, 8)
+	premiumTabCorner.Parent = premiumTabBtn
+
+	-- -----------------------------------------------------------------------
+	-- CONTENT CONTAINER (below header + tab bar)
+	-- -----------------------------------------------------------------------
+
+	local totalHeaderHeight = headerHeight + tabHeight
+
 	local contentContainer = Instance.new("Frame")
 	contentContainer.Name = "Content"
-	contentContainer.Size = UDim2.new(1, 0, 1, -headerHeight)
-	contentContainer.Position = UDim2.new(0, 0, 0, headerHeight)
+	contentContainer.Size = UDim2.new(1, 0, 1, -totalHeaderHeight)
+	contentContainer.Position = UDim2.new(0, 0, 0, totalHeaderHeight)
 	contentContainer.BackgroundTransparency = 1
 	contentContainer.Parent = mainFrame
+
+	-- -----------------------------------------------------------------------
+	-- ITEMS TAB CONTENT
+	-- -----------------------------------------------------------------------
 
 	local scrollFrame = Instance.new("ScrollingFrame")
 	scrollFrame.Name = "ScrollFrame"
@@ -360,6 +492,7 @@ local function CreateShopUI()
 	scrollFrame.ScrollBarThickness = isMobile and 4 or 6
 	scrollFrame.ScrollBarImageColor3 = Color3.fromRGB(120, 130, 160)
 	scrollFrame.CanvasSize = UDim2.new(0, 0, 0, 0)
+	scrollFrame.Visible = true
 	scrollFrame.Parent = contentContainer
 
 	local gridLayout = Instance.new("UIGridLayout")
@@ -499,7 +632,266 @@ local function CreateShopUI()
 		catCorner.Parent = categoryBadge
 	end
 
+	-- -----------------------------------------------------------------------
+	-- PREMIUM TAB CONTENT
+	-- -----------------------------------------------------------------------
+
+	local premCardWidth = isMobile and math.floor((shopWidth - 40) / 2) or 290
+	local premCardHeight = isMobile and 115 or 135
+
+	local premiumFrame = Instance.new("ScrollingFrame")
+	premiumFrame.Name = "PremiumFrame"
+	premiumFrame.Size = UDim2.new(1, -20, 1, -20)
+	premiumFrame.Position = UDim2.new(0, 10, 0, 10)
+	premiumFrame.BackgroundTransparency = 1
+	premiumFrame.BorderSizePixel = 0
+	premiumFrame.ScrollBarThickness = isMobile and 4 or 6
+	premiumFrame.ScrollBarImageColor3 = Color3.fromRGB(120, 130, 160)
+	premiumFrame.CanvasSize = UDim2.new(0, 0, 0, 0)
+	premiumFrame.Visible = false
+	premiumFrame.Parent = contentContainer
+
+	local premGrid = Instance.new("UIGridLayout")
+	premGrid.CellSize = UDim2.new(0, premCardWidth, 0, premCardHeight)
+	premGrid.CellPadding = UDim2.new(0, isMobile and 8 or 10, 0, isMobile and 8 or 10)
+	premGrid.HorizontalAlignment = Enum.HorizontalAlignment.Center
+	premGrid.SortOrder = Enum.SortOrder.LayoutOrder
+	premGrid.Parent = premiumFrame
+
+	premGrid:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(function()
+		premiumFrame.CanvasSize = UDim2.new(0, 0, 0, premGrid.AbsoluteContentSize.Y + 20)
+	end)
+
+	-- Create premium product cards
+	for i, item in ipairs(PREMIUM_ITEMS) do
+		local pCard = Instance.new("Frame")
+		pCard.Name = "PremCard_" .. item.id
+		pCard.BackgroundColor3 = Color3.fromRGB(55, 60, 78)
+		pCard.BorderSizePixel = 0
+		pCard.LayoutOrder = i
+		pCard.Parent = premiumFrame
+
+		local pCardCorner = Instance.new("UICorner")
+		pCardCorner.CornerRadius = UDim.new(0, 10)
+		pCardCorner.Parent = pCard
+
+		local pCardStroke = Instance.new("UIStroke")
+		pCardStroke.Color = Color3.fromRGB(80, 100, 150)
+		pCardStroke.Thickness = 1
+		pCardStroke.Parent = pCard
+
+		-- Icon
+		local pIcon = Instance.new("TextLabel")
+		pIcon.Name = "Icon"
+		pIcon.Size = UDim2.new(0, iconSize, 0, iconSize)
+		pIcon.Position = UDim2.new(0, isMobile and 8 or 10, 0, isMobile and 5 or 10)
+		pIcon.BackgroundTransparency = 1
+		pIcon.Text = item.icon
+		pIcon.TextScaled = true
+		pIcon.Font = Enum.Font.Gotham
+		pIcon.Parent = pCard
+
+		-- Name
+		local pName = Instance.new("TextLabel")
+		pName.Name = "Name"
+		pName.Size = UDim2.new(1, -iconSize - (isMobile and 15 or 25), 0, isMobile and 18 or 22)
+		pName.Position = UDim2.new(0, iconSize + (isMobile and 8 or 15), 0, isMobile and 5 or 10)
+		pName.BackgroundTransparency = 1
+		pName.Text = item.name
+		pName.TextColor3 = Color3.fromRGB(255, 255, 255)
+		pName.TextScaled = true
+		pName.Font = Enum.Font.GothamBold
+		pName.TextXAlignment = Enum.TextXAlignment.Left
+		pName.Parent = pCard
+
+		-- Description
+		local pDesc = Instance.new("TextLabel")
+		pDesc.Name = "Description"
+		pDesc.Size = UDim2.new(1, -15, 0, isMobile and 28 or 35)
+		pDesc.Position = UDim2.new(0, isMobile and 8 or 10, 0, isMobile and 42 or 55)
+		pDesc.BackgroundTransparency = 1
+		pDesc.Text = item.description
+		pDesc.TextColor3 = Color3.fromRGB(200, 210, 235)
+		pDesc.TextScaled = true
+		pDesc.Font = Enum.Font.Gotham
+		pDesc.TextXAlignment = Enum.TextXAlignment.Left
+		pDesc.TextWrapped = true
+		pDesc.Parent = pCard
+
+		-- Tag badge (1 Life / Forever)
+		local tagBadge = Instance.new("TextLabel")
+		tagBadge.Name = "Tag"
+		tagBadge.Size = UDim2.new(0, isMobile and 55 or 65, 0, isMobile and 14 or 18)
+		tagBadge.Position = UDim2.new(1, isMobile and -60 or -70, 0, isMobile and 24 or 32)
+		tagBadge.BackgroundColor3 = item.forever and Color3.fromRGB(60, 50, 100) or Color3.fromRGB(80, 60, 40)
+		tagBadge.Text = item.tag
+		tagBadge.TextColor3 = item.forever and Color3.fromRGB(200, 180, 255) or Color3.fromRGB(255, 220, 140)
+		tagBadge.TextScaled = true
+		tagBadge.Font = Enum.Font.GothamBold
+		tagBadge.Parent = pCard
+
+		local tagCorner = Instance.new("UICorner")
+		tagCorner.CornerRadius = UDim.new(0, 5)
+		tagCorner.Parent = tagBadge
+
+		-- Buy button (Robux style)
+		local pBuyBtn = Instance.new("TextButton")
+		pBuyBtn.Name = "BuyBtn"
+		pBuyBtn.Size = UDim2.new(1, -15, 0, buttonHeight)
+		pBuyBtn.Position = UDim2.new(0, 7.5, 1, -buttonHeight - 8)
+		pBuyBtn.BackgroundColor3 = Color3.fromRGB(0, 150, 60)
+		pBuyBtn.Text = "R$ " .. item.price
+		pBuyBtn.TextColor3 = Color3.new(1, 1, 1)
+		pBuyBtn.TextScaled = true
+		pBuyBtn.Font = Enum.Font.GothamBold
+		pBuyBtn.BorderSizePixel = 0
+		pBuyBtn.Parent = pCard
+
+		local pBuyCorner = Instance.new("UICorner")
+		pBuyCorner.CornerRadius = UDim.new(0, 8)
+		pBuyCorner.Parent = pBuyBtn
+
+		-- Update button to show OWNED if applicable
+		local function RefreshBuyButton()
+			if item.forever and item.ownedField and robuxOwnership[item.ownedField] then
+				pBuyBtn.Text = "OWNED ✓"
+				pBuyBtn.BackgroundColor3 = Color3.fromRGB(30, 120, 60)
+				pBuyBtn.TextColor3 = Color3.fromRGB(150, 255, 170)
+				pBuyBtn.Active = false
+				pBuyBtn.AutoButtonColor = false
+			else
+				pBuyBtn.Text = "R$ " .. item.price
+				pBuyBtn.BackgroundColor3 = Color3.fromRGB(0, 150, 60)
+				pBuyBtn.TextColor3 = Color3.new(1, 1, 1)
+				pBuyBtn.Active = true
+				pBuyBtn.AutoButtonColor = true
+			end
+		end
+
+		-- Store refresh function reference on button for later updates
+		pBuyBtn:SetAttribute("ItemId", item.id)
+		RefreshBuyButton()
+
+		pBuyBtn.MouseEnter:Connect(function()
+			if pBuyBtn.Active then
+				TweenService:Create(pBuyBtn, TweenInfo.new(0.15), {BackgroundColor3 = Color3.fromRGB(0, 190, 80)}):Play()
+				TweenService:Create(pCard, TweenInfo.new(0.15), {BackgroundColor3 = Color3.fromRGB(65, 72, 95)}):Play()
+			end
+		end)
+
+		pBuyBtn.MouseLeave:Connect(function()
+			if pBuyBtn.Active then
+				TweenService:Create(pBuyBtn, TweenInfo.new(0.15), {BackgroundColor3 = Color3.fromRGB(0, 150, 60)}):Play()
+				TweenService:Create(pCard, TweenInfo.new(0.15), {BackgroundColor3 = Color3.fromRGB(55, 60, 78)}):Play()
+			end
+		end)
+
+		pBuyBtn.MouseButton1Click:Connect(function()
+			if not pBuyBtn.Active then return end
+			-- Fire server to prompt the Robux purchase dialog
+			if PurchaseRobuxItemEvent then
+				PurchaseRobuxItemEvent:FireServer(item.id)
+			end
+		end)
+	end
+
+	-- -----------------------------------------------------------------------
+	-- TAB SWITCHING LOGIC
+	-- -----------------------------------------------------------------------
+
+	local function SwitchToTab(tab)
+		activeTab = tab
+		if tab == "items" then
+			scrollFrame.Visible = true
+			premiumFrame.Visible = false
+			itemsTabBtn.BackgroundColor3 = Color3.fromRGB(60, 70, 90)
+			itemsTabBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+			premiumTabBtn.BackgroundColor3 = Color3.fromRGB(35, 38, 52)
+			premiumTabBtn.TextColor3 = Color3.fromRGB(160, 165, 185)
+		else
+			scrollFrame.Visible = false
+			premiumFrame.Visible = true
+			premiumTabBtn.BackgroundColor3 = Color3.fromRGB(60, 70, 90)
+			premiumTabBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+			itemsTabBtn.BackgroundColor3 = Color3.fromRGB(35, 38, 52)
+			itemsTabBtn.TextColor3 = Color3.fromRGB(160, 165, 185)
+			-- Refresh OWNED status when Premium tab is opened
+			for _, pCard in pairs(premiumFrame:GetChildren()) do
+				if pCard:IsA("Frame") then
+					local btn = pCard:FindFirstChild("BuyBtn")
+					if btn then
+						local itemId = btn:GetAttribute("ItemId")
+						for _, premItem in ipairs(PREMIUM_ITEMS) do
+							if premItem.id == itemId and premItem.forever and premItem.ownedField then
+								if robuxOwnership[premItem.ownedField] then
+									btn.Text = "OWNED ✓"
+									btn.BackgroundColor3 = Color3.fromRGB(30, 120, 60)
+									btn.TextColor3 = Color3.fromRGB(150, 255, 170)
+									btn.Active = false
+									btn.AutoButtonColor = false
+								end
+								break
+							end
+						end
+					end
+				end
+			end
+		end
+	end
+
+	-- Apply correct tab on creation (preserve active tab across reopens)
+	SwitchToTab(activeTab)
+
+	itemsTabBtn.MouseButton1Click:Connect(function()
+		SwitchToTab("items")
+	end)
+
+	premiumTabBtn.MouseButton1Click:Connect(function()
+		SwitchToTab("premium")
+	end)
+
 	return gui
+end
+
+-- -------------------------------------------------------------------------------
+-- UPDATE PREMIUM BUTTONS (called when RobuxBoostSync fires)
+-- -------------------------------------------------------------------------------
+
+local function UpdatePremiumButtons()
+	if not shopGui then return end
+	local mainFrame = shopGui:FindFirstChild("MainFrame")
+	if not mainFrame then return end
+	local content = mainFrame:FindFirstChild("Content")
+	if not content then return end
+	local premFrame = content:FindFirstChild("PremiumFrame")
+	if not premFrame then return end
+
+	for _, pCard in pairs(premFrame:GetChildren()) do
+		if pCard:IsA("Frame") then
+			local btn = pCard:FindFirstChild("BuyBtn")
+			if btn then
+				local itemId = btn:GetAttribute("ItemId")
+				for _, premItem in ipairs(PREMIUM_ITEMS) do
+					if premItem.id == itemId and premItem.forever and premItem.ownedField then
+						if robuxOwnership[premItem.ownedField] then
+							btn.Text = "OWNED ✓"
+							btn.BackgroundColor3 = Color3.fromRGB(30, 120, 60)
+							btn.TextColor3 = Color3.fromRGB(150, 255, 170)
+							btn.Active = false
+							btn.AutoButtonColor = false
+						else
+							btn.Text = "R$ " .. premItem.price
+							btn.BackgroundColor3 = Color3.fromRGB(0, 150, 60)
+							btn.TextColor3 = Color3.new(1, 1, 1)
+							btn.Active = true
+							btn.AutoButtonColor = true
+						end
+						break
+					end
+				end
+			end
+		end
+	end
 end
 
 -- -------------------------------------------------------------------------------
@@ -604,6 +996,22 @@ SyncDataEvent.OnClientEvent:Connect(function(data, status, extra)
 		UpdateShopVC()
 	end
 end)
+
+-- Handle Robux ownership sync from server
+if RobuxBoostSyncEvent then
+	RobuxBoostSyncEvent.OnClientEvent:Connect(function(ownershipData)
+		if not ownershipData then return end
+		-- Update local ownership state
+		robuxOwnership.hasSpeedBoostForever   = ownershipData.hasSpeedBoostForever   or false
+		robuxOwnership.hasDoubleHealthForever = ownershipData.hasDoubleHealthForever or false
+		robuxOwnership.hasSpeedBoost1Life     = ownershipData.hasSpeedBoost1Life     or false
+		robuxOwnership.hasDoubleHealth1Life   = ownershipData.hasDoubleHealth1Life   or false
+		-- Refresh UI if shop is currently open
+		if isShopOpen then
+			UpdatePremiumButtons()
+		end
+	end)
+end
 
 UserInputService.InputBegan:Connect(function(input, gameProcessed)
 	if gameProcessed then return end
