@@ -110,6 +110,7 @@ local PurchaseItemEvent = GetOrCreateRemote("PurchaseItem")
 local UseItemEvent = GetOrCreateRemote("UseItem")
 local BoostUpdateEvent = GetOrCreateRemote("BoostUpdate")
 local ChestRewardEvent = GetOrCreateRemote("ChestReward")
+local RobuxBoostSyncEvent = GetOrCreateRemote("RobuxBoostSync")
 
 -- -------------------------------------------------------------------------------
 -- CONFIGURATION
@@ -119,6 +120,7 @@ local LOSE_ITEMS_ON_LEAVE = false
 local DEATH_PENALTY_PERCENT = 1.00
 local MAX_STACK = 10
 local MAX_SLOTS = 6
+local BASE_MAX_HEALTH = 100  -- Default humanoid MaxHealth
 
 local ITEMS = {
 	{id = "bandage", name = "Bandage", price = 15, type = "heal", value = 20, icon = "??"},
@@ -156,6 +158,10 @@ local function GetDefaultData()
 		totalEarned = 0,
 		deaths = 0,
 		version = 4,
+		hasSpeedBoostForever = false,
+		hasDoubleHealthForever = false,
+		hasSpeedBoost1Life = false,
+		hasDoubleHealth1Life = false,
 	}
 end
 
@@ -167,6 +173,11 @@ local function MigrateData(data)
 	if not data then return GetDefaultData() end
 
 	if data.version and data.version >= 4 then
+		-- Ensure new Robux boost fields exist for older V4 saves
+		if data.hasSpeedBoostForever == nil then data.hasSpeedBoostForever = false end
+		if data.hasDoubleHealthForever == nil then data.hasDoubleHealthForever = false end
+		if data.hasSpeedBoost1Life == nil then data.hasSpeedBoost1Life = false end
+		if data.hasDoubleHealth1Life == nil then data.hasDoubleHealth1Life = false end
 		return data
 	end
 
@@ -176,6 +187,10 @@ local function MigrateData(data)
 		totalEarned = data.totalEarned or 0,
 		deaths = data.deaths or 0,
 		version = 4,
+		hasSpeedBoostForever = false,
+		hasDoubleHealthForever = false,
+		hasSpeedBoost1Life = false,
+		hasDoubleHealth1Life = false,
 	}
 
 	if data.inventory and type(data.inventory) == "table" then
@@ -223,6 +238,7 @@ local function GetPlayerBoosts(player)
 			staminaBoostEndTime = 0,
 			speedBoostEndTime = 0,
 			speedMultiplier = 1,
+			robuxSpeedMultiplier = 1,
 		}
 	end
 	return playerBoosts[player.UserId]
@@ -607,8 +623,8 @@ local function ApplyItemEffect(player, item)
 		local walkSpeed = 20
 		local runSpeed = 36
 
-		local boostedWalkSpeed = walkSpeed * item.value
-		local boostedRunSpeed = runSpeed * item.value
+		local boostedWalkSpeed = walkSpeed * item.value * boosts.robuxSpeedMultiplier
+		local boostedRunSpeed = runSpeed * item.value * boosts.robuxSpeedMultiplier
 
 		humanoid.WalkSpeed = boostedRunSpeed
 		boosts.speedBoostEndTime = tick() + item.duration
@@ -643,7 +659,7 @@ local function ApplyItemEffect(player, item)
 				if char then
 					local hum = char:FindFirstChild("Humanoid")
 					if hum then
-						hum.WalkSpeed = walkSpeed
+						hum.WalkSpeed = walkSpeed * boosts.robuxSpeedMultiplier
 						boosts.speedMultiplier = 1
 						SyncBoostsToClient(player)
 					end
@@ -654,6 +670,79 @@ local function ApplyItemEffect(player, item)
 		return true, "SPEED_BOOST"
 	end
 	return false, "UNKNOWN_TYPE"
+end
+
+-- -------------------------------------------------------------------------------
+-- ROBUX BOOST FUNCTIONS
+-- -------------------------------------------------------------------------------
+
+local function ApplyRobuxBoosts(player)
+	if not player or not player.Parent then return end
+	local data = playerData[player.UserId]
+	if not data then return end
+
+	local char = player.Character
+	if not char then return end
+
+	local humanoid = char:FindFirstChild("Humanoid")
+	if not humanoid then return end
+
+	local boosts = GetPlayerBoosts(player)
+
+	-- Apply Double Health (Forever or 1-Life)
+	if data.hasDoubleHealthForever or data.hasDoubleHealth1Life then
+		humanoid.MaxHealth = BASE_MAX_HEALTH * 2
+		humanoid.Health = BASE_MAX_HEALTH * 2
+	end
+
+	-- Apply Speed Boost (Forever or 1-Life)
+	if data.hasSpeedBoostForever or data.hasSpeedBoost1Life then
+		boosts.robuxSpeedMultiplier = 1.5
+		-- Only set WalkSpeed directly if no consumable speed boost is currently active
+		if not IsSpeedBoostActive(player) then
+			humanoid.WalkSpeed = 20 * 1.5
+		end
+	else
+		boosts.robuxSpeedMultiplier = 1
+	end
+
+	-- Sync ownership status to client
+	RobuxBoostSyncEvent:FireClient(player, {
+		hasSpeedBoostForever = data.hasSpeedBoostForever or false,
+		hasDoubleHealthForever = data.hasDoubleHealthForever or false,
+		hasSpeedBoost1Life = data.hasSpeedBoost1Life or false,
+		hasDoubleHealth1Life = data.hasDoubleHealth1Life or false,
+	})
+end
+
+local function GrantRobuxBoost(player, boostType)
+	if not player or not player.Parent then return false end
+	local data = playerData[player.UserId]
+	if not data then return false end
+
+	if boostType == "SPEED_BOOST_1LIFE" then
+		data.hasSpeedBoost1Life = true
+	elseif boostType == "SPEED_BOOST_FOREVER" then
+		data.hasSpeedBoostForever = true
+	elseif boostType == "DOUBLE_HEALTH_1LIFE" then
+		data.hasDoubleHealth1Life = true
+	elseif boostType == "DOUBLE_HEALTH_FOREVER" then
+		data.hasDoubleHealthForever = true
+	else
+		warn("[CurrencySystem] GrantRobuxBoost: unknown boostType " .. tostring(boostType))
+		return false
+	end
+
+	-- Apply boost to character immediately if alive
+	ApplyRobuxBoosts(player)
+
+	-- Persist
+	task.spawn(function()
+		SavePlayerData(player)
+	end)
+
+	print("[CurrencySystem] Granted Robux boost '" .. boostType .. "' to " .. player.Name)
+	return true
 end
 
 -- -------------------------------------------------------------------------------
@@ -716,11 +805,41 @@ local function OnPlayerDied(player)
 		end
 	end
 
+	-- Clear 1-Life Robux boosts on death
+	local hadDoubleHealth1Life = data.hasDoubleHealth1Life
+	local hadSpeedBoost1Life = data.hasSpeedBoost1Life
+	data.hasSpeedBoost1Life = false
+	data.hasDoubleHealth1Life = false
+
+	-- Determine Robux speed multiplier that survives death (only Forever)
+	local survivingSpeedMult = data.hasSpeedBoostForever and 1.5 or 1
+
 	playerBoosts[player.UserId] = {
 		staminaBoostEndTime = 0,
 		speedBoostEndTime = 0,
 		speedMultiplier = 1,
+		robuxSpeedMultiplier = survivingSpeedMult,
 	}
+
+	-- Reset MaxHealth if 1-Life double health was active and Forever is not
+	if hadDoubleHealth1Life and not data.hasDoubleHealthForever then
+		local char = player.Character
+		if char then
+			local humanoid = char:FindFirstChild("Humanoid")
+			if humanoid then
+				humanoid.MaxHealth = BASE_MAX_HEALTH
+				humanoid.Health = math.min(humanoid.Health, BASE_MAX_HEALTH)
+			end
+		end
+	end
+
+	-- Notify client of updated Robux boost state
+	RobuxBoostSyncEvent:FireClient(player, {
+		hasSpeedBoostForever = data.hasSpeedBoostForever or false,
+		hasDoubleHealthForever = data.hasDoubleHealthForever or false,
+		hasSpeedBoost1Life = false,
+		hasDoubleHealth1Life = false,
+	})
 
 	SyncPlayer(player)
 	SyncBoostsToClient(player)
@@ -821,6 +940,7 @@ Players.PlayerAdded:Connect(function(player)
 			staminaBoostEndTime = 0,
 			speedBoostEndTime = 0,
 			speedMultiplier = 1,
+			robuxSpeedMultiplier = 1,
 		}
 
 		task.wait(1)
@@ -836,6 +956,7 @@ Players.PlayerAdded:Connect(function(player)
 			staminaBoostEndTime = 0,
 			speedBoostEndTime = 0,
 			speedMultiplier = 1,
+			robuxSpeedMultiplier = 1,
 		}
 
 		local humanoid = char:WaitForChild("Humanoid", 10)
@@ -849,6 +970,8 @@ Players.PlayerAdded:Connect(function(player)
 		if player and player.Parent then
 			SyncPlayer(player)
 			SyncBoostsToClient(player)
+			-- Re-apply any active Robux boosts (Forever or 1-Life)
+			ApplyRobuxBoosts(player)
 		end
 	end)
 end)
@@ -944,6 +1067,17 @@ _G.CurrencySystem = {
 	end,
 	GetPlayerData = function(player)
 		return playerData[player.UserId]
+	end,
+	-- Robux boost functions
+	GrantRobuxBoost = GrantRobuxBoost,
+	ApplyRobuxBoosts = ApplyRobuxBoosts,
+	HasSpeedBoost = function(player)
+		local data = playerData[player.UserId]
+		return data and (data.hasSpeedBoostForever or data.hasSpeedBoost1Life) or false
+	end,
+	HasDoubleHealth = function(player)
+		local data = playerData[player.UserId]
+		return data and (data.hasDoubleHealthForever or data.hasDoubleHealth1Life) or false
 	end,
 }
 
